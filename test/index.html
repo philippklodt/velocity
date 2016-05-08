@@ -519,7 +519,7 @@
 
 						/* Ensure previous transform values are reused. */
 						Velocity($target4, { translateX: parseFloat(testTransforms.translateX) / 2 });
-						equal(Data($target4, pluginName).tweensContainer.translateX.startValue, parseFloat(testTransforms.translateX), "Previous transform value was reused.");
+						equal(Data($target4, pluginName).tweensContainer.tff1.startValue, parseFloat(testTransforms.translateX), "Previous transform value was reused.");
 					}, completeCheckDuration);
 				}
 
@@ -552,12 +552,14 @@
 						equal(Math.round(Data($svgRect, pluginName).tweensContainer.height.startValue), parseFloat(svgStartValues.height), "SVG dimensional attribute #3 value was retrieved.");
 						equal(Math.round(parseFloat(Velocity.CSS.getPropertyValue($svgRect, "height"))), parseFloat(svgEndValues.height)/100 * 1000, "SVG dimensional attribute #3 end value was set.");
 
-						equal(Math.round(Data($svgRect, pluginName).tweensContainer.rotateZ.startValue), 0, "SVG 2D transform value was retrieved.");
-						equal(Math.round(parseFloat(Velocity.CSS.getPropertyValue($svgRect, "rotateZ"))), parseFloat(svgEndValues.rotateZ), "SVG 2D transform end value was set.");
+            let rotateZProp = `tff${ Data($svgRect, pluginName).transformList.findIndex(tff=>tff.name==='rotateZ') }`;
+						equal(Math.round(Data($svgRect, pluginName).tweensContainer[rotateZProp].startValue), 0, "SVG 2D transform value was retrieved.");
+						equal(Math.round(parseFloat(Velocity.CSS.getPropertyValue($svgRect, rotateZProp))), parseFloat(svgEndValues.rotateZ), "SVG 2D transform end value was set.");
 
 						if (!IE) {
-							equal(Math.round(Data($svgRect, pluginName).tweensContainer.rotateX.startValue), 0, "SVG 3D transform value was retrieved.");
-							equal(Math.round(parseFloat(Velocity.CSS.getPropertyValue($svgRect, "rotateX"))), parseFloat(svgEndValues.rotateX), "SVG 3D transform end value was set.");
+              let rotateXProp = `tff${ Data($svgRect, pluginName).transformList.findIndex(tff=>tff.name==='rotateX') }`;
+							equal(Math.round(Data($svgRect, pluginName).tweensContainer[rotateXProp].startValue), 0, "SVG 3D transform value was retrieved.");
+							equal(Math.round(parseFloat(Velocity.CSS.getPropertyValue($svgRect, rotateXProp))), parseFloat(svgEndValues.rotateX), "SVG 3D transform end value was set.");
 						}
 
 						equal(Math.round(Data($svgRect, pluginName).tweensContainer.strokeDasharray.startValue), 0, "SVG CSS style value was retrieved.");
@@ -1360,8 +1362,10 @@
 			Velocity($target1, "callout.twirl");
 
 			setTimeout(function() {
-				equal(parseFloat(Velocity.CSS.getPropertyValue($target1, "rotateZ")), 1080, "First call's property animated.");
-				equal(parseFloat(Velocity.CSS.getPropertyValue($target1, "scaleX")), 1, "Last call's property animated.");
+        let rotateZProp = `tff${ Data($target1, pluginName).transformList.findIndex(tff=>tff.name==='rotateZ') }`;
+				equal(parseFloat(Velocity.CSS.getPropertyValue($target1, rotateZProp)), 1080, "First call's property animated.");
+        let scaleXProp = `tff${ Data($target1, pluginName).transformList.findIndex(tff=>tff.name==='scaleX') }`;
+				equal(parseFloat(Velocity.CSS.getPropertyValue($target1, scaleXProp)), 1, "Last call's property animated.");
 
 				start();
 			}, effectDefaultDuration * 1.50);

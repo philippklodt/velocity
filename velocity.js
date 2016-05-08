@@ -624,7 +624,20 @@ return function (global, window, document, undefined) {
             delay: false,
             mobileHA: true,
             /* Advanced: Set to false to prevent property values from being cached between consecutive Velocity-initiated chain calls. */
-            _cacheValues: true
+            _cacheValues: true,
+            /* Internally used to prevent tff-properties form being cached when the transformList is reset via `transformComposition: 'set'`. */
+            _cacheTffValues: true,
+            /* An array of transform functions that
+             * - will be appended to the element's `transformList`
+             * - can be referenced in propertiesMap by plain transform name (as before) or by index.
+             * . ( E.g. if transformSequence is ['translateY','rotateX','translateY','rotateX'],
+             * . the first `rotateX` can be referenced like this: `{tff1: '30deg'}`)
+             * . 'tff' as an abbreviation for 'transform function'
+             * . . ( Terminology from spec: https://drafts.csswg.org/css-transforms/#typedef-transform-function )
+             * Thus, if this option is set (even with an empty array),
+             * . all transform functions in the property map will be appended to the transformList.
+            **/
+            transformSequence: undefined
         },
         /* A design goal of Velocity is to cache data wherever possible in order to avoid DOM requerying. Accordingly, each element has a data cache. */
         init: function (element) {
@@ -643,8 +656,9 @@ return function (global, window, document, undefined) {
                    1) Concurrently-animating hooks sharing the same root can have their root values' merged into one while tweening.
                    2) Post-hook-injection root values can be transferred over to consecutively chained Velocity calls as starting root values. */
                 rootPropertyValueCache: {},
-                /* A cache for transform updates, which must be manually flushed via CSS.flushTransformCache(). */
-                transformCache: {}
+                /* A cache for transform updates, which must be manually flushed via CSS.flushTransformList().
+                /* . Contains entries of the form {name:'rotateX', val: '30deg'}. */
+                transformList: []
             });
         },
         /* A parallel to jQuery's $.css(), used for getting/setting Velocity's hooked CSS properties. */
@@ -1168,6 +1182,76 @@ return function (global, window, document, undefined) {
                 }
             }
         },
+        Transforms : {
+          /* ASSUMES: If <prop> is a tff-index, it is valid (in the [0,..,sequenceLength] range), as this is checked on options parsing / Velocity.hook().
+           * -1 indicates that the <prop> is *not* a tff-property */
+          toTffIndex     : prop => ("tff" === prop.substring(0,3)) ? parseInt(prop.substring(3)) : -1,
+          /* Assumes that 3d transforms are `concat()`ed to `transformsBase` as done in Normalizations.register() */
+          isTransformName: transformName => CSS.Lists.transformsBase.indexOf(transformName) !== -1,
+          /* NOTE_PERSPECTIVE: What about transformPerspective? 0 seems to work, but spec talks about infinity:
+           * https://drafts.csswg.org/css-transforms/#identity-transform-function , also:
+           * > The value for depth must be greater than zero, otherwise the function is invalid.
+           * ( https://drafts.csswg.org/css-transforms/#three-d-transform-functions )
+          **/
+          identityValue  : transformName => (transformName.substring(0,5) === "scale" ? 1 : 0),
+          /* 'Normalize' the properties map, i.e.
+           * - Turn plain transformNames into the indexed version
+           * - Filter out invalid tff-indices
+          **/
+          sanitizeProps : (props, element, transformSequence) => {
+            let saneProps = {};
+            const tffList = Data(element).transformList;
+            const len = tffList.length;
+            if (transformSequence) {
+              const newSequence = transformSequence.map( name => ({
+                name: name,
+                val : CSS.Transforms.identityValue(name)
+              }));
+              newSequence.forEach( tff => { tffList.push(tff); } );
+            }
+            for (let prop in props) {
+              if (CSS.Transforms.isTransformName(prop)) {
+                let ix = -1;
+                if (transformSequence) {
+                  /* Readme Snippet 4. TFFs refer to the passed transformSequence. */
+                  ix = transformSequence.indexOf(prop);
+                  if (ix === -1) {
+                    /* transform name not found in transformSequence, so append. */
+                    ix = tffList.length;
+                    tffList.push({name: prop, val: CSS.Transforms.identityValue(prop)});
+                  } else
+                    ix += len;
+                } else {
+                  /* If user just specifies the transformName ('translateX' a.o.t. 'tff1'),
+                   * . modify the (first) existing tff of the same type .. [Vanilla Velocity behavior]
+                  **/
+                  ix = tffList.findIndex( tff => tff.name === prop );
+                  /* .. or - if there is none - append to the tffList. [Vanilla Velocity behavior] */
+                  if (ix === -1) {
+                    ix = tffList.length;
+                    tffList.push({name: prop, val: CSS.Transforms.identityValue(prop)});
+                  }
+                }
+                saneProps[`tff${ ix }`] = props[prop];
+                continue;
+              }
+              else if (prop.substring(0,3) === "tff") {
+                /* NOTE_INDICES: Filter out of the propsMap all tff-entries with invalid indices,
+                 * so toTffIndex() (via get/setProp.value()) later can assume 'sane' indices
+                **/
+                ix = parseInt(prop.substring(3));
+                if (transformSequence)
+                  ix += len;
+                if (!isNaN(ix) && ix >= 0 && ix < tffList.length)
+                  saneProps[`tff${ ix }`] = props[prop];
+                continue;
+              }
+              /* not a transform property, use it as is. */
+              saneProps[prop] = props[prop];
+            }
+            return saneProps;
+          }
+        },
 
         /*******************
            Normalizations
@@ -1299,7 +1383,7 @@ return function (global, window, document, undefined) {
                 /* Transforms are the subproperties contained by the CSS "transform" property. Transforms must undergo normalization
                    so that they can be referenced in a properties map by their individual names. */
                 /* Note: When transforms are "set", they are actually assigned to a per-element transformCache. When all transform
-                   setting is complete complete, CSS.flushTransformCache() must be manually called to flush the values to the DOM.
+                   setting is complete complete, CSS.flushTransformList() must be manually called to flush the values to the DOM.
                    Transform setting is batched in this way to improve performance: the transform style only needs to be updated
                    once when multiple transform subproperties are being animated simultaneously. */
                 /* Note: IE9 and Android Gingerbread have support for 2D -- but not 3D -- transforms. Since animating unsupported
@@ -1311,14 +1395,13 @@ return function (global, window, document, undefined) {
                     share the same name, the latter is given a unique token within Velocity: "transformPerspective". */
                     CSS.Lists.transformsBase = CSS.Lists.transformsBase.concat(CSS.Lists.transforms3D);
                 }
-
                 for (var i = 0; i < CSS.Lists.transformsBase.length; i++) {
                     /* Wrap the dynamically generated normalization function in a new scope so that transformName's value is
                     paired with its respective function. (Otherwise, all functions would take the final for loop's transformName.) */
                     (function() {
                         var transformName = CSS.Lists.transformsBase[i];
 
-                        CSS.Normalizations.registered[transformName] = function (type, element, propertyValue) {
+                        CSS.Normalizations.registered[transformName] = function (type, element, propertyValue, ix) {
                             switch (type) {
                                 /* The normalized property name is the parent "transform" property -- the property that is actually set in CSS. */
                                 case "name":
@@ -1326,13 +1409,11 @@ return function (global, window, document, undefined) {
                                 /* Transform values are cached onto a per-element transformCache object. */
                                 case "extract":
                                     /* If this transform has yet to be assigned a value, return its null value. */
-                                    if (Data(element) === undefined || Data(element).transformCache[transformName] === undefined) {
-                                        /* Scale CSS.Lists.transformsBase default to 1 whereas all other transform properties default to 0. */
+                                    if (Data(element) === undefined || Data(element).transformList[ix] === undefined) {
+                                        /* Scale CSS.Lists.transformsBase default to 1 whereas all other transform properties default to 0. For `transformPerspective` see NOTE_PERSPECTIVE. */
                                         return /^scale/i.test(transformName) ? 1 : 0;
-                                    /* When transform values are set, they are wrapped in parentheses as per the CSS spec.
-                                       Thus, when extracting their values (for tween calculations), we strip off the parentheses. */
                                     } else {
-                                        return Data(element).transformCache[transformName].replace(/[()]/g, "");
+                                        return Data(element).transformList[ix].val;
                                     }
                                 case "inject":
                                     var invalid = false;
@@ -1351,7 +1432,7 @@ return function (global, window, document, undefined) {
                                             /* Chrome on Android has a bug in which scaled elements blur if their initial scale
                                                value is below 1 (which can happen with forcefeeding). Thus, we detect a yet-unset scale property
                                                and ensure that its first value is always 1. More info: http://stackoverflow.com/questions/10417890/css3-animations-with-transform-causes-blurred-elements-on-webkit/10417962#10417962 */
-                                            if (Velocity.State.isAndroid && Data(element).transformCache[transformName] === undefined && propertyValue < 1) {
+                                            if (Velocity.State.isAndroid && Data(element).transformList[ix] === undefined && propertyValue < 1) {
                                                 propertyValue = 1;
                                             }
 
@@ -1367,11 +1448,11 @@ return function (global, window, document, undefined) {
 
                                     if (!invalid) {
                                         /* As per the CSS spec, wrap the value in parentheses. */
-                                        Data(element).transformCache[transformName] = "(" + propertyValue + ")";
+                                        Data(element).transformList[ix].val = propertyValue;
                                     }
 
                                     /* Although the value is set on the transformCache object, return the newly-updated value for the calling code to process as normal. */
-                                    return Data(element).transformCache[transformName];
+                                    return Data(element).transformList[ix].val;
                             }
                         };
                     })();
@@ -1718,9 +1799,14 @@ return function (global, window, document, undefined) {
 
             var propertyValue;
 
+            const ix = CSS.Transforms.toTffIndex(property);
+            if (ix !== -1) {
+              /* Range valid? Should be guaranteed by caller (see NOTE_INDICES) */
+              propertyValue = CSS.Normalizations.registered[Data(element).transformList[ix].name]("extract", element, undefined, ix);
+            }
             /* If this is a hooked property (e.g. "clipLeft" instead of the root property of "clip"),
                extract the hook's value from a normalized rootPropertyValue using CSS.Hooks.extractValue(). */
-            if (CSS.Hooks.registered[property]) {
+            else if (CSS.Hooks.registered[property]) {
                 var hook = property,
                     hookRoot = CSS.Hooks.getRoot(hook);
 
@@ -1817,15 +1903,22 @@ return function (global, window, document, undefined) {
                     }
                 }
             } else {
-                /* Transforms (translateX, rotateZ, etc.) are applied to a per-element transformCache object, which is manually flushed via flushTransformCache().
+              const ix = CSS.Transforms.toTffIndex(property);
+                /* Transforms (translateX, rotateZ, etc.) are applied to a per-element transformList, which is manually flushed via flushTransformList().
                    Thus, for now, we merely cache transforms being SET. */
-                if (CSS.Normalizations.registered[property] && CSS.Normalizations.registered[property]("name", element) === "transform") {
-                    /* Perform a normalization injection. */
-                    /* Note: The normalization logic handles the transformCache updating. */
-                    CSS.Normalizations.registered[property]("inject", element, propertyValue);
-
-                    propertyName = "transform";
-                    propertyValue = Data(element).transformCache[property];
+              if (ix !== -1) {
+                  propertyName = "transform";
+                  const tff = Data(element).transformList[ix];
+                  /* NOTE_INDICES guarantees valid `ix`-range *at the point of pre-queueing*, .. */
+                  if (tff)
+                    propertyValue = CSS.Normalizations.registered[tff.name]("inject", element, propertyValue, ix);
+                  /* .. BUT `transformList` may have been reset.
+                   * This happens if a subsequent Velocity call resets the `transformList`, see `ix`-handling in `buildQueue()`.
+                   * => Bottom line, just abort.
+                  **/
+                  else {
+                    return [null,null];
+                  }
                 } else {
                     /* Inject hooks. */
                     if (CSS.Hooks.registered[property]) {
@@ -1872,18 +1965,23 @@ return function (global, window, document, undefined) {
             return [ propertyName, propertyValue ];
         },
 
-        /* To increase performance by batching transform updates into a single SET, transforms are not directly applied to an element until flushTransformCache() is called. */
+        /* To increase performance by batching transform updates into a single SET, transforms are not directly applied to an element until flushTransformList() is called. */
         /* Note: Velocity applies transform properties in the same order that they are chronogically introduced to the element's CSS styles. */
-        flushTransformCache: function(element) {
+        flushTransformList: function(element, purgeIdentityTransforms, mobileHA) {
             var transformString = "";
 
-            /* Certain browsers require that SVG transforms be applied as an attribute. However, the SVG transform attribute takes a modified version of CSS's transform string
+            const initialValue = mobileHA ? "translate3d(0px, 0px, 0px) " : "";
+
+                /* Certain browsers require that SVG transforms be applied as an attribute. However, the SVG transform attribute takes a modified version of CSS's transform string
                (units are dropped and, except for skewX/Y, subproperties are merged into their master property -- e.g. scaleX and scaleY are merged into scale(X Y). */
             if ((IE || (Velocity.State.isAndroid && !Velocity.State.isChrome)) && Data(element).isSVG) {
                 /* Since transform values are stored in their parentheses-wrapped form, we use a helper function to strip out their numeric values.
                    Further, SVG transform properties only take unitless (representing pixels) values, so it's okay that parseFloat() strips the unit suffixed to the float value. */
                 function getTransformFloat (transformProperty) {
-                    return parseFloat(CSS.getPropertyValue(element, transformProperty));
+                    /* TODO Test this thoroughly on SVG elements */
+                    const ix = Data(element).transformList.findIndex( tff => tff.name === transformProperty );
+                    const val = ix === -1 ? CSS.Transforms.identityValue(transformProperty) : CSS.getPropertyValue(element, `tff${ ix }`);
+                    return parseFloat(val);
                 }
 
                 /* Create an object to organize all the transforms that we'll apply to the SVG element. To keep the logic simple,
@@ -1899,9 +1997,12 @@ return function (global, window, document, undefined) {
                     rotate: [ getTransformFloat("rotateZ"), 0, 0 ]
                 };
 
+                transformString += initialValue;
                 /* Iterate through the transform properties in the user-defined property map order.
                    (This mimics the behavior of non-SVG transform animation.) */
-                $.each(Data(element).transformCache, function(transformName) {
+                Data(element).transformList.forEach( function(transformItem) {
+                  let transformName = transformItem.name;
+//                $.each(Data(element).transformCache, function(transformName) {
                     /* Except for with skewX/Y, revert the axis-specific transform subproperties to their axis-free master
                        properties so that they match up with SVG's accepted transform properties. */
                     if (/^translate/i.test(transformName)) {
@@ -1923,31 +2024,18 @@ return function (global, window, document, undefined) {
                     }
                 });
             } else {
-                var transformValue,
-                    perspective;
-
-                /* Transform properties are stored as members of the transformCache object. Concatenate all the members into a string. */
-                $.each(Data(element).transformCache, function(transformName) {
-                    transformValue = Data(element).transformCache[transformName];
-
-                    /* Transform's perspective subproperty must be set first in order to take effect. Store it temporarily. */
-                    if (transformName === "transformPerspective") {
-                        perspective = transformValue;
-                        return true;
-                    }
-
-                    /* IE9 only supports one rotation type, rotateZ, which it refers to as "rotate". */
-                    if (IE === 9 && transformName === "rotateZ") {
-                        transformName = "rotate";
-                    }
-
-                    transformString += transformName + transformValue + " ";
-                });
-
-                /* If present, set the perspective subproperty first. */
-                if (perspective) {
-                    transformString = "perspective" + perspective + " " + transformString;
-                }
+              const tffList = Data(element).transformList;
+              if (purgeIdentityTransforms) {
+                /* Works even if list is empty. MDN: if the array is empty, initialValue is returned without calling callback */
+                transformString = tffList.reduce(
+                  /* Quick hack: `parseInt()` turns '0px' into integer 0. (might happen if set via `Velocity.hook()`, in fact this would better be handled there.)  */
+                  (acc, tff) => parseFloat(tff.val) === CSS.Transforms.identityValue(tff.name) ? acc : (acc + `${ tff.name }(${ tff.val }) `), initialValue
+                );
+              }
+              else
+                transformString = tffList.reduce( (acc, tff) => acc + `${ tff.name }(${ tff.val }) `, initialValue);
+              /* IE9 only supports one rotation type, rotateZ, which it refers to as "rotate". */
+              IE===9 && (transformString = transformString.replace('rotateZ', 'rotate'));
             }
 
             CSS.setPropertyValue(element, "transform", transformString);
@@ -1959,37 +2047,86 @@ return function (global, window, document, undefined) {
     CSS.Normalizations.register();
 
     /* Allow hook setting in the same fashion as jQuery's $.css(). */
-    Velocity.hook = function (elements, arg2, arg3) {
-        var value = undefined;
-
-        elements = sanitizeElements(elements);
-
-        $.each(elements, function(i, element) {
+    Velocity.hook = function (elements, prop, val) {
+        for (let element of sanitizeElements(elements)) {
             /* Initialize Velocity's per-element data cache if this element hasn't previously been animated. */
             if (Data(element) === undefined) {
                 Velocity.init(element);
             }
 
             /* Get property value. If an element set was passed in, only return the value for the first element. */
-            if (arg3 === undefined) {
-                if (value === undefined) {
-                    value = Velocity.CSS.getPropertyValue(element, arg2);
+            if (val === undefined) {
+                /* Necessary as we removed support for plain transformNames from getPropertyValue() */
+                if (CSS.Transforms.isTransformName(prop)) {
+                  const ix = Data(element).transformList.findIndex( tff => tff.name === prop );
+                  if (ix === -1)
+                    return CSS.Transforms.identityValue(prop);
+                  return CSS.getPropertyValue(element, `tff${ ix }`);
                 }
+                if (prop.substring(0,3) === "tff") {
+                  const len = Data(element).transformList.length;
+                  const ix = parseInt(prop.substring(3));
+                  if (isNaN(ix) || ix < 0 || ix >= len)
+                    return;
+                }
+                return CSS.getPropertyValue(element, prop);
             /* Set property value. */
             } else {
+                let propWrapper = {}; propWrapper[prop] = val;
+                /* Guarantees valid tff-indices (NOTE_INDICES) for sPV.
+                 * Leave `transformSequence` parameter undefined,
+                 * . to achieve 'vanilla velocity' behaviour, should a transformName be passed.
+                **/
+                const sanePropWrapper = CSS.Transforms.sanitizeProps(propWrapper, element);
+                let isInvalid = true;
+                /* get the key */
+                for (let saneProp in sanePropWrapper) {
+                  prop = saneProp;
+                  isInvalid = false;
+                }
+                /* Means it contained an invalid tff-index */
+                if (isInvalid)
+                  return;
                 /* sPV returns an array of the normalized propertyName/propertyValue pair used to update the DOM. */
-                var adjustedSet = Velocity.CSS.setPropertyValue(element, arg2, arg3);
+                var adjustedSet = CSS.setPropertyValue(element, prop, val);
 
                 /* Transform properties don't automatically set. They have to be flushed to the DOM. */
                 if (adjustedSet[0] === "transform") {
-                    Velocity.CSS.flushTransformCache(element);
+                  /* As we are not animating anything don't set mobileHA hack, also don't set identity transforms (2nd arg.), as there is no use to it. */
+                    CSS.flushTransformList(element, true, false);
                 }
 
-                value = adjustedSet;
+                return adjustedSet;
             }
-        });
+        }
 
-        return value;
+    };
+
+    /* Allows to set (or append to ) the transformSequence without calling `Velocity()`. */
+    Velocity.transformSequence = function (elements, transformSequence, transformComposition) {
+        for (let element of sanitizeElements(elements)) {
+          /* Initialize Velocity's per-element data cache if this element hasn't previously been animated. */
+          if (Data(element) === undefined) {
+              Velocity.init(element);
+          }
+          /* Reset `transformList` */
+          else if (transformComposition !== "append" && Data(element).transformList.length)
+            Data(element).transformList = [];
+
+          for (let prop of transformSequence) {
+            if (!CSS.Transforms.isTransformName(prop))
+              continue;
+            Data(element).transformList.push({name: prop, val: CSS.Transforms.identityValue(prop)});
+          }
+        }
+    };
+    Velocity.reduceTransformSequence = function(elements, startIx, deleteCount) {
+      sanitizeElements(elements).forEach( element => {
+        /* Initialize Velocity's per-element data cache if this element hasn't previously been animated. */
+        if (Data(element) === undefined)
+            Velocity.init(element);
+        Data(element).transformList.splice(startIx, deleteCount);
+      });
     };
 
     /*****************
@@ -2500,6 +2637,29 @@ return function (global, window, document, undefined) {
             /* Note: You can read more about the use of mobileHA in Velocity's documentation: VelocityJS.org/#mobileHA. */
             opts.mobileHA = (opts.mobileHA && Velocity.State.isMobile && !Velocity.State.isGingerbread);
 
+            /*******************************
+               Option: transformSequence
+            *******************************/
+
+            /* Require all transformNames to be valid, otherwise discard the whole transformSequence */
+            if ( opts.transformSequence
+              && opts.transformSequence.some( name => !CSS.Transforms.isTransformName(name) ) )
+              delete opts.transformSequence;
+              /* ----------------- FEATURE REMOVED ----------------- */
+              // if (opts.transformComposition === "set") {
+              /* `transformComposition` has been set to "set".
+                /* (Re)Set the transformList. As this - a.o.t. "append" - changes the 'semantics' of the tff-properties
+                 * .. (say 'tff1' was translateX, now it's rotateX)
+                 * .. we should *avoid* transferring values from previous calls.
+                 * This way `getPropertyValue()` will be invoked and identityValues will be used as startValues.
+                **/
+                // opts._cacheTffValues = false;
+                // Data(element).transformList = newSequence;
+              // }
+              /* ----------------- FEATURE REMOVED ----------------- */
+            /* Guarantees sane indices and converts plain transformNames into index-form. Potentially extends the transformList. */
+            propertiesMap = CSS.Transforms.sanitizeProps(propertiesMap, element, opts.transformSequence);
+
             /***********************
                Part II: Queueing
             ***********************/
@@ -2599,7 +2759,8 @@ return function (global, window, document, undefined) {
                 /* Note: Reverse calls do not need to be consecutively chained onto a currently-animating element in order to operate on cached values;
                    there is no harm to reverse being called on a potentially stale data cache since reverse's behavior is simply defined
                    as reverting to the element's values as they were prior to the previous *Velocity* call. */
-                } else if (action === "reverse") {
+                }
+                else if (action === "reverse") {
                     /* Abort if there is no prior animation data to reverse to. */
                     if (!Data(element).tweensContainer) {
                         /* Dequeue the element so that this queue entry releases itself immediately, allowing subsequent queue entries to run. */
@@ -2810,8 +2971,24 @@ return function (global, window, document, undefined) {
                            we force the property to its camelCase styling to normalize it for manipulation. */
                         property = CSS.Names.camelCase(property);
 
+                        /* In case this is a tff property ('tff1'), we sometimes need the corresponding named transform property ('rotateX') e.g. unit conversion. */
+                        const ix = CSS.Transforms.toTffIndex(property);
+                        let resolvedProp = property;
+                        /* Resolve tff-index to transform name. */
+                        if (ix !== -1) {
+                          const tff = Data(element).transformList[ix];
+                          /* NOTE_INDICES guarantees valid `ix`-range *at the time of pre-queueing*, .. */
+                          if (!tff) {
+                            /* .. but not queueing. Thus `transformList` may have been reset (Think queue:false and transformComposition:set)
+                             * In that case we should ignore this property (as done for unsupported properties below).
+                            **/
+                            if (Velocity.debug) console.log("Skipping TFF-property [" + property + "] as the element's transformList has apparently been reset by a subsequent Velocity call.");
+                            continue;
+                          }
+                          resolvedProp = tff.name;
+                        }
                         /* In case this property is a hook, there are circumstances where we will intend to work on the hook's root property and not the hooked subproperty. */
-                        var rootProperty = CSS.Hooks.getRoot(property),
+                        var rootProperty = CSS.Hooks.getRoot(resolvedProp),
                             rootPropertyValue = false;
 
                         /* Other than for the dummy tween property, properties that are not supported by the browser (and do not have an associated normalization) will
@@ -2835,7 +3012,8 @@ return function (global, window, document, undefined) {
                         /* If values have been transferred from the previous Velocity call, extract the endValue and rootPropertyValue
                            for all of the current call's properties that were *also* animated in the previous call. */
                         /* Note: Value transferring can optionally be disabled by the user via the _cacheValues option. */
-                        if (opts._cacheValues && lastTweensContainer && lastTweensContainer[property]) {
+                        /* . Transfer from tff-property (<=> ix!==-1) only if _cacheTffValues is also set. */
+                        if (opts._cacheValues && lastTweensContainer && lastTweensContainer[property] && (ix === -1 || opts._cacheTffValues) ) {
                             if (startValue === undefined) {
                                 startValue = lastTweensContainer[property].endValue + lastTweensContainer[property].unitType;
                             }
@@ -2847,7 +3025,7 @@ return function (global, window, document, undefined) {
                         /* If values were not transferred from a previous Velocity call, query the DOM as needed. */
                         } else {
                             /* Handle hooked properties. */
-                            if (CSS.Hooks.registered[property]) {
+                            if (CSS.Hooks.registered[resolvedProp]) {
                                if (startValue === undefined) {
                                     rootPropertyValue = CSS.getPropertyValue(element, rootProperty); /* GET */
                                     /* Note: The following getPropertyValue() call does not actually trigger a DOM query;
@@ -2901,13 +3079,14 @@ return function (global, window, document, undefined) {
                             return [ numericValue, unitType ];
                         }
 
-                        /* Separate startValue. */
-                        separatedValue = separateValue(property, startValue);
+                        /* Separate startValue.*/
+                        /* Use resolvedProp ('translateX' a.o.t. 'tff1') so the right unit type can be deduced if none was supplied. */
+                        separatedValue = separateValue(resolvedProp, startValue);
                         startValue = separatedValue[0];
                         startValueUnitType = separatedValue[1];
 
                         /* Separate endValue, and extract a value operator (e.g. "+=", "-=") if one exists. */
-                        separatedValue = separateValue(property, endValue);
+                        separatedValue = separateValue(resolvedProp, endValue);
                         endValue = separatedValue[0].replace(/^([+-\/*])=/, function(match, subMatch) {
                             operator = subMatch;
 
@@ -2933,7 +3112,7 @@ return function (global, window, document, undefined) {
                                 endValue = endValue / 100;
                                 endValueUnitType = "em";
                             /* For scaleX and scaleY, convert the value into its decimal format and strip off the unit type. */
-                            } else if (/^scale/.test(property)) {
+                            } else if (/^scale/.test(resolvedProp)) {
                                 endValue = endValue / 100;
                                 endValueUnitType = "";
                             /* For RGB components, take the defined percentage of 255 and strip off the unit type. */
@@ -3060,6 +3239,12 @@ return function (global, window, document, undefined) {
                            Unit Conversion
                         ********************/
 
+                        /* - - - These conversions all assume that the unit to be converted can be converted to 'px' (length units). - - -
+                                 This works as currently only 'deg' is supported for angles (rotate and skew).
+                                 Should be kept in mind when supporting other types from spec: https://drafts.csswg.org/css-values-3/#angle-value
+                                 .. such as 'grad' 'rad' 'turn'.
+                                 Solution would be to trivially convert them to 'deg' beforehand (a la 'Property-Specific Value Conversion' above).
+                                 */
                         /* The * and / operators, which are not passed in with an associated unit, inherently use startValue's unit. Skip value and unit conversion. */
                         if (/[\/*]/.test(operator)) {
                             endValueUnitType = startValueUnitType;
@@ -3082,7 +3267,7 @@ return function (global, window, document, undefined) {
 
                                 /* The following RegEx matches CSS properties that have their % values measured relative to the x-axis. */
                                 /* Note: W3C spec mandates that all of margin and padding's properties (even top and bottom) are %-relative to the *width* of the parent element. */
-                                var axis = (/margin|padding|left|right|width|text|word|letter/i.test(property) || /X$/.test(property) || property === "x") ? "x" : "y";
+                                var axis = (/margin|padding|left|right|width|text|word|letter/i.test(property) || /X$/.test(resolvedProp) || property === "x") ? "x" : "y";
 
                                 /* In order to avoid generating n^2 bespoke conversion functions, unit conversion is a two-step process:
                                    1) Convert startValue into pixels. 2) Convert this new pixel value into endValue's unit type. */
@@ -3172,6 +3357,12 @@ return function (global, window, document, undefined) {
                 /* Note: tweensContainer can be empty if all of the properties in this call's property map were skipped due to not
                    being supported by the browser. The element property is used for checking that the tweensContainer has been appended to. */
                 if (tweensContainer.element) {
+                    /* Set the mobileHA hack. Will be removed in completeCall().
+                     * . We don't save the hack's transform3d inside the Data(element).transformList,
+                     * . .. so handling this in tick() would require setting a flag 'hasMobileHackAlreadyApplied' in Data(element), ugly..
+                    **/
+                    opts.mobileHA && CSS.flushTransformList(element, false, true);
+
                     /* Apply the "velocity-animating" indicator class. */
                     CSS.Values.addClass(element, "velocity-animating");
 
@@ -3543,7 +3734,7 @@ return function (global, window, document, undefined) {
                                    Transforms
                                 ***************/
 
-                                /* Flag whether a transform property is being animated so that flushTransformCache() can be triggered once this tick pass is complete. */
+                                /* Flag whether a transform property is being animated so that flushTransformList() can be triggered once this tick pass is complete. */
                                 if (adjustedSetData[0] === "transform") {
                                     transformPropertyExists = true;
                                 }
@@ -3555,21 +3746,22 @@ return function (global, window, document, undefined) {
                     /****************
                         mobileHA
                     ****************/
+                    /* Moved to Queuing step (see 'Call Push' ) */
 
                     /* If mobileHA is enabled, set the translate3d transform to null to force hardware acceleration.
                        It's safe to override this property since Velocity doesn't actually support its animation (hooks are used in its place). */
-                    if (opts.mobileHA) {
-                        /* Don't set the null transform hack if we've already done so. */
+/*                     if (opts.mobileHA) {
+                        /* Don't set the null transform hack if we've already done so. *
                         if (Data(element).transformCache.translate3d === undefined) {
-                            /* All entries on the transformCache object are later concatenated into a single transform string via flushTransformCache(). */
+                            /* All entries on the transformCache object are later concatenated into a single transform string via flushTransformList(). *
                             Data(element).transformCache.translate3d = "(0px, 0px, 0px)";
 
                             transformPropertyExists = true;
                         }
                     }
-
+ */
                     if (transformPropertyExists) {
-                        CSS.flushTransformCache(element);
+                        CSS.flushTransformList(element, false, opts.mobileHA);
                     }
                 }
 
@@ -3656,30 +3848,11 @@ return function (global, window, document, undefined) {
                     /* Clear the element's rootPropertyValueCache, which will become stale. */
                     Data(element).rootPropertyValueCache = {};
 
-                    var transformHAPropertyExists = false;
-                    /* If any 3D transform subproperty is at its default value (regardless of unit type), remove it. */
-                    $.each(CSS.Lists.transforms3D, function(i, transformName) {
-                        var defaultValue = /^scale/.test(transformName) ? 1 : 0,
-                            currentValue = Data(element).transformCache[transformName];
-
-                        if (Data(element).transformCache[transformName] !== undefined && new RegExp("^\\(" + defaultValue + "[^.]").test(currentValue)) {
-                            transformHAPropertyExists = true;
-
-                            delete Data(element).transformCache[transformName];
-                        }
-                    });
-
-                    /* Mobile devices have hardware acceleration removed at the end of the animation in order to avoid hogging the GPU's memory. */
-                    if (opts.mobileHA) {
-                        transformHAPropertyExists = true;
-                        delete Data(element).transformCache.translate3d;
-                    }
-
-                    /* Flush the subproperty removals to the DOM. */
-                    if (transformHAPropertyExists) {
-                        CSS.flushTransformCache(element);
-                    }
-
+                    /* If any 3D transform subproperty is at its default value (regardless of unit type), remove it. *
+                    /* Mobile devices have hardware acceleration removed at the end of the animation in order to avoid hogging the GPU's memory. *
+                    /* These two are accomplished by 2nd and 3rd option, respectively. */
+                    if (opts.mobileHA || Data(element).transformList.length !== 0)
+                      CSS.flushTransformList(element, true, false);
                     /* Remove the "velocity-animating" indicator class. */
                     CSS.Values.removeClass(element, "velocity-animating");
                 }
