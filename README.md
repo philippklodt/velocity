@@ -26,6 +26,7 @@ This package allows you to
 
 - have TFFs reliably applied in the order you specify,
 - control animation of each of the TFFs individually, even if one transform name occurs multiple times,
+
 while..
 - preserving the behavior of your existing Velocity code (even transforms),
 - maintaining Velocity's key functionalities to make transforms fast, value caching and the `mobileHA` option, and
@@ -33,7 +34,7 @@ while..
 
 ## Basic usage
 ### Put multiple simultaneous TFFs in order
-You can set an element's transformSequence via `$.Velocity.transformSequence()`. Pass an array describing the ordered list of TFFs. 
+You can set an element's transform sequence via `$.Velocity.transformSequence()`. Pass an array describing the ordered list of TFFs. 
 
 Say you want to animate an element from its initial position to the state described in Example 1 above.
 
@@ -44,14 +45,14 @@ $.Velocity.transformSequence($el, ['rotateZ', 'translateY']);
 $el.velocity({translateY: 100, rotateZ: 30});
 ```
 
-Note: The TFFs of the transformSequence are initialized to their *identityValue*, that is 1 for the scale-transforms and 0 for all others.
+Note: The TFFs of the transform sequence are initialized to their *identity value*, that is 1 for the scale-transforms and 0 for all others.
 
 ### Append additional TFFs, some of which multiple times.
 Now let's say later on you want to tilt the object and move it further towards its front, leading to the final state of Example 2.
 
-Pass the additional effects as an option to `transformSequence()` and pass `'append'` as an additional parameter. This will append the sequence to the existing transformString, leaving the previous TFFs intact.
+Pass only the additional effects as an option to `transformSequence()` and pass `'append'` as an additional parameter. This will append the sequence to the existing transformString, leaving the previous TFFs intact.
 
-As there are now two TFFs of type `translateY` you have to refer to each single TFF by its (zero-based) index in the transformSequence like so:
+As there are now two TFFs of type `translateY` you have to refer to each single TFF by its (zero-based) index in the transform sequence like so:
 
 *(Snippet 2)*
 ```javascript
@@ -71,23 +72,23 @@ $el.velocity({tff1: 0});
 ### Various
 The `Velocity.hook()` function is also supported (that is, you can pass the index-form as the hook name).
 
-If you want to remove parts (or all) of the internal transformSequence, use `Velocity.reduceTransformSequence()`. It takes the first two arguments from [Array.prototype.splice()]. For example, to remove the last three TFFs:
+If you want to remove parts (or all) of the internal transform sequence, use `Velocity.reduceTransformSequence()`. It takes the first two arguments from [Array.prototype.splice()]. For example, to remove the last three TFFs:
 ```javascript
 $.Velocity.reduceTransformSequence($el, -3);
 ```
-Always make sure that the TFFs you are about to remove are at their identityValues.
+Always make sure that the TFFs you are about to remove are at their identity values.
 
 ## Advanced usage
-You can also pass a transformSequence as an option to the `velocity()` call. It will be appended to the transform string, just as in Snippet 2.
+You can also pass a `transformSequence` as an option to the `velocity()` call. It will be appended to the transform string, just as in Snippet 2.
 
-But now all TFFs you specify in the property map will refer to the passed transformSequence and never alter the values in the previous transform string.
+But now all TFFs you specify in the property map will refer to the passed transform sequence and never alter the values in the previous transform string.
 
 To achieve the same effect of Snippet 2 you can do the following.
 *(Snippet 4)*
 ```javascript
 $el.velocity({rotateX: 45, translateY: 60}, {transformSequence: ['rotateX', 'translateY']});
 ```
-Note that `translateY` here unambiguously refers to the one in the transformSequence and not to the `translateY` TFF in the existing transform string. So this syntax can be useful to avoid the (admittedly ugly) index form.
+Note that `translateY` here unambiguously refers to the one in the transform sequence and not to the `translateY` TFF in the existing transform string. So this syntax can be useful to avoid the (admittedly ugly) index form.
 
 ## Best practices
 The syntax is quite flexible and therefore can be used in a lot of different ways, good and bad.
@@ -95,7 +96,14 @@ The syntax is quite flexible and therefore can be used in a lot of different way
 This is an obviously debatable list of rules of thumb about how to make the best use of the package.
 - *Setting* the `transformSequence` (Snippet 1) should only ever be done when the element is in its initial state (no transforms applied). So prefer to set the entire sequence in advance, even if some transforms are left at their identity values initially.
 - If you want to initialize a transform property to a value other than its zero-value, use force-feeding (if you animate) or the `hook()` function (if you don't).
-- For clarity of code, use the index-form only if necessary, that is if you have more than one occurrence of the TFF in the `transformSequence`. Even then 
+- For clarity of code, use the index-form only if necessary, that is if you have more than one occurrence of the TFF in the `transformSequence`. Even then you should prefer aliasing the index-form by a more meaningful name. If you have access to ES2015 syntax, you can do something like this for Snippet 3:
+
+    ```javascript
+    /* after defining the transform sequence */
+    const MEANINGFUL_NAME = 'tff1';
+    /* .. later on when animating */
+    $el.velocity({ [MEANINGFUL_NAME]: 0 });
+    ```
 
 ## Caveats
 - I could not resist to use some of the ES2015 syntax (arrow functions, `let`/`const`, template literals, etc.). So you need to use [Babel] or something similar to make it work on all the browsers supported by Velocity.
