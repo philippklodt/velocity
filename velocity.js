@@ -2084,7 +2084,7 @@ return function (global, window, document, undefined) {
                   prop = saneProp;
                   isInvalid = false;
                 }
-                /* Means it contained an invalid tff-index */
+                /* Means it contained an invalid tff-index. Skip for all elements */
                 if (isInvalid)
                   return;
                 /* sPV returns an array of the normalized propertyName/propertyValue pair used to update the DOM. */
@@ -2096,10 +2096,10 @@ return function (global, window, document, undefined) {
                     CSS.flushTransformList(element, true, false);
                 }
 
-                return adjustedSet;
             }
         }
 
+        return adjustedSet;
     };
 
     /* Allows to set (or append to ) the transformSequence without calling `Velocity()`. */
