@@ -2514,6 +2514,8 @@ return function (global, window, document, undefined) {
             ***************************/
 
             var element = this,
+                /* . */
+                elementPropertiesMap = $.extend({}, propertiesMap),
                 /* The runtime opts object is the extension of the current call's options and Velocity's page-wide option defaults. */
                 opts = $.extend({}, Velocity.defaults, options),
                 /* A container for the processed data associated with each property in the propertyMap.
@@ -2920,8 +2922,10 @@ return function (global, window, document, undefined) {
                     }
 
                     /* Cycle through each property in the map, looking for shorthand color properties (e.g. "color" as opposed to "colorRed"). Inject the corresponding
-                       colorRed, colorGreen, and colorBlue RGB component tweens into the propertiesMap (which Velocity understands) and remove the shorthand property. */
-                    $.each(propertiesMap, function(property, value) {
+                       colorRed, colorGreen, and colorBlue RGB component tweens into the propertiesMap (which Velocity understands) and remove the shorthand property.
+                       The 'per element' property map is used to allow passing value functions.
+                       */
+                    $.each(elementPropertiesMap, function(property, value) {
                         /* Find shorthand color properties that have been passed a hex string. */
                         if (RegExp("^" + CSS.Lists.colors.join("$|^") + "$").test(property)) {
                             /* Parse the value data for each shorthand. */
@@ -2948,24 +2952,24 @@ return function (global, window, document, undefined) {
                                         dataArray.push(startValueRGB[i]);
                                     }
 
-                                    propertiesMap[property + colorComponents[i]] = dataArray;
+                                    elementPropertiesMap[property + colorComponents[i]] = dataArray;
                                 }
 
                                 /* Remove the intermediary shorthand property entry now that we've processed it. */
-                                delete propertiesMap[property];
+                                delete elementPropertiesMap[property];
                             }
                         }
                     });
 
                     /* Create a tween out of each property, and append its associated data to tweensContainer. */
-                    for (var property in propertiesMap) {
+                    for (var property in elementPropertiesMap) {
 
                         /**************************
                            Start Value Sourcing
                         **************************/
 
                         /* Parse out endValue, easing, and startValue from the property's data. */
-                        var valueData = parsePropertyValue(propertiesMap[property]),
+                        var valueData = parsePropertyValue(elementPropertiesMap[property]),
                             endValue = valueData[0],
                             easing = valueData[1],
                             startValue = valueData[2];
