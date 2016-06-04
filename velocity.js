@@ -2663,7 +2663,7 @@ return function (global, window, document, undefined) {
               // }
               /* ----------------- FEATURE REMOVED ----------------- */
             /* Guarantees sane indices and converts plain transformNames into index-form. Potentially extends the transformList. */
-            propertiesMap = CSS.Transforms.sanitizeProps(propertiesMap, element, opts.transformSequence);
+            elementPropertiesMap = CSS.Transforms.sanitizeProps(elementPropertiesMap, element, opts.transformSequence);
 
             /***********************
                Part II: Queueing
